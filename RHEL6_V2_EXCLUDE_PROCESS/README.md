@@ -55,7 +55,7 @@ sudo systemctl daemon-reload
 sudo systemctl enable monitor_service
 sudo systemctl start monitor_service
 ```
-#### Man page for service
+#### Manual page for service
 ```bash
 sudo cp monitor_service.8 /usr/share/man/man8/
 sudo mandb
@@ -123,8 +123,9 @@ sudo systemctl start monitor_service
   ```bash
   sudo systemctl stop monitor_service
   ```
+<hr>  
 
-### Audit modificări fișiere (auditd)
+#### TO DO Audit modificări fișiere (auditd)
 
 Pentru a înregistra cine și când modifică `monitor_service.sh` sau fișierele de configurare, folosește Linux Audit (auditd). Aceasta oferă detalii precum utilizatorul de login original (auid), procesul care a făcut modificarea, timpul exact și terminalul/IP-ul.
 
@@ -167,3 +168,14 @@ sudo aureport -f -i --summary
 Note:
 - `auid` este identitatea de login inițială (utilă când s-a folosit `sudo`).
 - Pentru protecție temporară poți bloca modificările: `sudo chattr +i /opt/monitor_service/monitor_service.sh` (dezactivezi cu `sudo chattr -i ...`).
+
+#### TO DO : Restart comenzi multiple
+`&&` pentru “execută următoarea doar dacă cea anterioară reușește”  
+`;` pentru “execută indiferent”  
+`||` pentru “execută următoarea doar dacă anterioara eșuează”
+
+#### Random test-alarm
+
+```bash
+./test_alarm.sh --random --min-delay 10 --max-delay 30 --max-at-once 2 &
+```
