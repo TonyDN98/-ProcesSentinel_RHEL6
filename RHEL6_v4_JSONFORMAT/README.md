@@ -27,7 +27,7 @@ sudo chmod 755 /opt/monitor_service
 sudo chmod 700 /opt/monitor_service/monitor_service.sh
 sudo chmod 600 /opt/monitor_service/config.ini
 
-# bash: ./monitor_service.sh: /bin/bash^M: bad interpreter: No such file or directory
+# Dacă apar CRLF-uri pe fișierele copiate din Windows
 sed -i 's/\r$//' monitor_service.sh config.ini monitor_service.conf test_alarm.sh
 ```
 
@@ -55,6 +55,7 @@ sudo systemctl daemon-reload
 sudo systemctl enable monitor_service
 sudo systemctl start monitor_service
 ```
+
 #### Manual page for service
 ```bash
 sudo cp monitor_service.8 /usr/share/man/man8/

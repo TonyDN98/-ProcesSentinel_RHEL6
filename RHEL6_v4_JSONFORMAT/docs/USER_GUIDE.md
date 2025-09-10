@@ -19,11 +19,12 @@ Process Monitor Service este o soluție de monitorizare a sistemului care reporn
 ### Caracteristici Principale
 
 - Monitorizarea și repornirea automată a proceselor
-- Strategii multiple de repornire (service, process, auto)
-- Heath Check pentru a confirma repornirile reușite
+- Strategii multiple de repornire (service, process, custom)
+- Health Check pentru a confirma repornirile reușite
 - Model circuit breaker pentru a preveni încercările excesive de repornire
-- Jurnalizare cuprinzătoare cu rotație automată
-- Configurabil pentru diferite procese și medii
+- Jurnalizare text sau JSON, cu rotație automată
+- Configurabil per proces; sunt gestionate doar procesele cu secțiune dedicată
+- Acces MySQL securizat via fișier temporar `--defaults-file`
 
 ## Instalare
 
@@ -148,31 +149,20 @@ Configurare pentru loguri.
 |---------------------|------------------------------------------------|----------|-----------------|
 | max_log_size        | Dimensiunea maximă a unui fișier de log (KB)   | 5120     | max_log_size = 5120 |
 | log_files_to_keep   | Număr de fișiere de log păstrate (rotație)     | 5        | log_files_to_keep = 5 |
+| format              | Formatul logului: `text` sau `json`            | text     | format = json        |
+| json_pretty         | Pretty print în consolă dacă `jq` este prezent | false    | json_pretty = true   |
 
 ---
 
-### 4. Secțiunea `[process.default]`
-Valori implicite pentru toate procesele, dacă nu sunt suprascrise la nivel de proces.
-
-| Parametru              | Descriere                                                                 | Implicit | Exemplu                  |
-|------------------------|---------------------------------------------------------------------------|----------|--------------------------|
-| restart_strategy       | Strategia de restart: `auto`, `service`, `process`, `custom`              | auto     | restart_strategy = auto  |
-| health_check_command   | Comanda pentru health check (ex: `pgrep %s`)                              | pgrep %s | health_check_command = pgrep %s |
-| health_check_timeout   | Timeout (secunde) pentru health check                                     | 5        | health_check_timeout = 5 |
-| restart_delay          | Pauză (secunde) între încercări de restart                                | 2        | restart_delay = 2        |
-| max_attempts           | Număr maxim de încercări de restart la o alarmă                           | 2        | max_attempts = 2         |
-
----
-
-### 5. Secțiuni `[process.<nume>]`
-Configurare specifică pentru fiecare serviciu/proces monitorizat. Suprascrie valorile din `[process.default]`.
+### 4. Secțiuni `[process.<nume>]`
+Configurare specifică pentru fiecare serviciu/proces monitorizat. Doar procesele care au o secțiune dedicată sunt gestionate; cele fără secțiune sunt ignorate.
 
 | Parametru              | Descriere                                                                 | Folosit când...                                 | Exemplu                                  |
 |------------------------|---------------------------------------------------------------------------|-------------------------------------------------|-------------------------------------------|
-| restart_strategy       | `auto`, `service`, `process`, `custom`                                    | Pentru orice proces                             | restart_strategy = custom                 |
+| restart_strategy       | `service`, `process`, `custom`                                            | Pentru orice proces                             | restart_strategy = custom                 |
 | system_name            | Numele real al serviciului pe server (dacă diferă de cheie)               | Folosit la `service`/`process` sau `%s`         | system_name = rsyslog                     |
-| restart_command        | Comanda custom de restart (doar pentru `custom`)                          | Doar dacă `restart_strategy = custom`           | restart_command = systemctl restart %s    |
-| health_check_command   | Comanda pentru health check                                               | Oricând                                         | health_check_command = systemctl is-active sshd |
+| restart_command        | Comanda custom de restart (doar pentru `custom` sau prioritar dacă e setat)| Dacă `restart_command` este setat, se execută   | restart_command = initctl restart %s      |
+| health_check_command   | Comanda pentru health check                                               | Oricând                                         | health_check_command = initctl status sshd \| grep -q start/running |
 | health_check_timeout   | Timeout (secunde) pentru health check                                     | Oricând                                         | health_check_timeout = 5                  |
 | restart_delay          | Pauză (secunde) între încercări de restart                                | Oricând                                         | restart_delay = 5                         |
 | max_attempts           | Număr maxim de încercări de restart la o alarmă                           | Oricând                                         | max_attempts = 3                          |
@@ -183,21 +173,19 @@ Configurare specifică pentru fiecare serviciu/proces monitorizat. Suprascrie va
 #### Explicații detaliate pentru parametri cheie
 
 - **restart_strategy**
-  - `auto`: Scriptul decide automat strategia (de obicei `service`).
-  - `service`: Folosește `systemctl restart <system_name>`.
-  - `process`: Oprește și pornește procesul direct (cu `pkill` și exec).
-  - `custom`: Execută comanda din `restart_command`.
+  - `service`: Folosește `initctl start/restart <system_name>` ca fallback dacă nu există `restart_command`.
+  - `process`: Oprește și pornește procesul direct (cu `pgrep`/`pkill` și exec).
+  - `custom`: Execută comanda din `restart_command` (dacă include `%s`, se substituie cu `system_name` sau numele procesului).
 
 - **system_name**
   - Folosit pentru a specifica numele real al serviciului/procesului pe server.
-  - Util doar dacă:
+  - Util dacă:
     - Folosești `restart_strategy = service` sau `process`
     - Sau dacă ai `%s` în `restart_command` (la `custom`)
 
 - **restart_command**
-  - Folosit doar dacă `restart_strategy = custom`.
+  - Dacă este setat, are prioritate (se execută direct) indiferent de strategie.
   - Dacă include `%s`, acesta va fi înlocuit cu `system_name` (dacă există) sau cu numele procesului.
-  - Exemplu: `restart_command = /usr/local/bin/restart.sh %s`
 
 - **health_check_command**
   - Comanda care verifică dacă procesul/serviciul rulează corect după restart.
@@ -210,12 +198,12 @@ Configurare specifică pentru fiecare serviciu/proces monitorizat. Suprascrie va
 
 ### Exemple de configurare
 
-#### 1. Serviciu clasic systemd
+#### 1. Serviciu clasic (Upstart/initctl fallback)
 ```ini
 [process.sshd]
 restart_strategy = service
 system_name = sshd
-health_check_command = systemctl is-active sshd
+health_check_command = initctl status sshd | grep -q start/running
 ```
 
 #### 2. Serviciu cu nume diferit pe server
@@ -223,7 +211,7 @@ health_check_command = systemctl is-active sshd
 [process.rsyslogd]
 restart_strategy = service
 system_name = rsyslog
-health_check_command = systemctl is-active rsyslog
+health_check_command = initctl status rsyslog | grep -q start/running
 ```
 
 #### 3. Restart custom cu script extern
@@ -247,9 +235,9 @@ health_check_command = pgrep cron
 
 ### Atenționări
 
-- Parametrii ca `restart_command` sunt ignorați dacă strategia nu este `custom`.
-- `system_name` nu are efect dacă nu este folosit în strategia sau comanda de restart.
-- Pentru orice parametru lipsă la nivel de proces, se folosește valoarea din `[process.default]`.
+- Parametrii ca `restart_command` sunt executați ca atare dacă sunt configurați (au prioritate).
+- Procesele fără secțiune `[process.<nume>]` în `config.ini` sunt ignorate de serviciu.
+- Nu există valori implicite globale pentru procese; fiecare proces trebuie configurat explicit.
 
 ## Utilizarea Serviciului
 
@@ -331,8 +319,8 @@ CONFIGURATION
        secțiuni pentru:
          - [database]: conexiune MySQL
          - [monitor]: intervale și circuit breaker
-         - [logging]: rotație loguri
-         - [process.<nume>]: configurare per proces
+         - [logging]: rotație loguri și format text/json
+         - [process.<nume>]: configurare per proces (obligatorie)
 
        Exemplu minimal:
          [database]
@@ -349,10 +337,11 @@ CONFIGURATION
          [logging]
          max_log_size = 5120
          log_files_to_keep = 5
+         format = json
 
          [process.sshd]
          restart_strategy = service
-         health_check_command = systemctl is-active sshd
+         health_check_command = initctl status sshd | grep -q start/running
 
 EXAMPLES
        Pornește serviciul ca daemon:
@@ -381,9 +370,8 @@ AUTHOR
        AD
 
 SEE ALSO
-       systemctl(1), mysql(1), pkill(1), journalctl(1)
+       systemctl(1), mysql(1), pkill(1), journalctl(1), initctl(8)
 ```
-
 
 ### Utilizare din linia de comandă (CLI)
 
@@ -455,6 +443,7 @@ Acest script vă permite să:
 - Setați servicii specifice în stare de alarmă
 - Setați toate serviciile în stare de alarmă
 - Resetați toate alarmele
+- Porniți un mod aleator de injectare a alarmelor
 
 ### Flux de Testare
 
@@ -514,6 +503,8 @@ Fișierul de jurnal (**/var/log/monitor_service.log**) conține informații deta
 - Mesajele de nivel **ERROR** indică eșecuri care necesită atenție
 - Mesajele de nivel **DEBUG** oferă informații detaliate pentru depanare
 
+Formatul jurnalelor poate fi `text` sau `json`, controlat din `[logging]`. Pentru `json_pretty = true` și dacă `jq` este instalat, consola va afișa output-ul JSON frumos formatat, în timp ce fișierul rămâne one-line JSON per eveniment.
+
 #### Exemple de Mesaje de Jurnal
 
 - **Pornirea Serviciului**
@@ -551,11 +542,11 @@ Fișierul de jurnal (**/var/log/monitor_service.log**) conține informații deta
 
 ### Cum știe serviciul ce procese să monitorizeze?
 
-Serviciul monitorizează procesele listate în tabelul **PROCESE** din baza de date MySQL. Fiecare proces are o intrare corespunzătoare în tabelul **STATUS_PROCESS** care îi urmărește starea de alarmă.
+Serviciul monitorizează doar procesele care au o secțiune `[process.<nume>]` în `config.ini`. Procesele fără secțiune dedicată sunt ignorate.
 
 ### Cum decide serviciul când să repornească un proces?
 
-Serviciul verifică tabelul **STATUS_PROCESS** pentru procesele cu **alarma=1** şi **sound=0**. Când găsește un proces în stare de alarmă care nu este bifat, încearcă să-l repornească folosind strategia configurată.
+Serviciul verifică tabelul **STATUS_PROCESS** pentru procesele cu **alarma=1** şi **sound=0**. Când găsește un proces în stare de alarmă care nu este bifat, încearcă să-l repornească folosind strategia configurată pentru acel proces.
 
 ### Ce este modelul circuit breaker?
 
@@ -563,7 +554,7 @@ Modelul **circuit breaker** previne încercările excesive de repornire pentru p
 
 ### Cum pot adăuga health checkuri personalizate?
 
-Puteți adăuga health check personalizat configurând parametrul health_check_command pentru un proces. Această comandă ar trebui să returneze codul de ieșire 0 dacă procesul este ON, sau non-zero dacă este OFF.
+Puteți adăuga health check personalizat configurând parametrul health_check_command pentru un proces. Această comandă ar trebui să returneze codul de ieșire 0 dacă procesul este ON, sau non-zero dacă este OFF. Puteți utiliza `%s` pentru a insera `system_name`.
 
 ### Ce se întâmplă dacă baza de date MySQL este oprită?
 

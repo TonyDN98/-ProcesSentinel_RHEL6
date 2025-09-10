@@ -17,9 +17,9 @@ Process Monitor Service constă din următoarele fișiere:
 Script-ul `monitor_service.sh` este organizat în secțiuni funcționale:
 
 1. **Gestionarea Configurației**: Funcții pentru citirea și validarea configurației
-2. **Logging**: Funcții pentru jurnalizare și rotația jurnalelor
-3. **Interacțiunea cu Baza de Date**: Funcții pentru interogarea și actualizarea bazei de date
-4. **Gestionarea Proceselor**: Funcții pentru repornirea proceselor folosind diferite strategii
+2. **Logging**: Funcții pentru jurnalizare și rotația jurnalelor (text/JSON, json_pretty)
+3. **Interacțiunea cu Baza de Date**: Funcții pentru interogarea și actualizarea bazei de date (folosind `--defaults-file` pentru credențiale)
+4. **Gestionarea Proceselor**: Funcții pentru repornirea proceselor folosind strategii `service`/`process`/`custom`
 5. **Implementarea Circuit Breaker**: Funcții pentru gestionarea modelului circuit breaker
 6. **Bucla Principală**: Bucla principală de monitorizare care leagă totul împreună
 
@@ -35,18 +35,15 @@ Citește și validează configurația din fișierul config.ini.
 # Read configuration from config.ini
 read_config() {
     # Validate config file exists
-    # Parse database section
-    # Parse monitor section
-    # Parse logging section
-    # Set defaults for missing values
-    # Validate required values
-    # Verify numeric values
+    # Parse database, monitor, logging
+    # Set defaults for logging (max_log_size, log_files_to_keep, format, json_pretty)
+    # Validate required values and numeric constraints
 }
 ```
 
 #### `get_process_config()`
 
-Recuperează configurația specifică procesului cu revenire la valorile implicite.
+Recuperează configurația specifică procesului fără fallback la `[process.default]`. Dacă lipsește parametrul în secțiunea procesului, se folosește valoarea implicită furnizată ca argument al funcției (de ex. `max_attempts`=2, `restart_delay`=2, `health_check_timeout`=5).
 
 ```bash
 # Get process-specific configuration
@@ -54,10 +51,7 @@ get_process_config() {
     local process_name="$1"
     local param="$2"
     local default_value="$3"
-
-    # Try process-specific setting
-    # Fall back to default process settings
-    # Fall back to provided default
+    # Returnează valoarea din [process.<nume>] sau default_value
 }
 ```
 
@@ -65,9 +59,7 @@ get_process_config() {
 
 #### `log()`
 
-Scrie un mesaj de log cu timestamp, rotește logul dacă este necesar. Mesajele de nivel **ERROR/CRITICAL** sunt trimise și către syslog.
-
-
+Scrie un mesaj de log cu timestamp, rotește logul dacă este necesar. Poate scrie în format **text** sau **json** (controlat din `[logging]`), iar nivelurile **ERROR/CRITICAL** sunt trimise la syslog. Cu `json_pretty = true` și utilitarul `jq` disponibil, output-ul în consolă este pretty, în timp ce fișierul rămâne o linie JSON per eveniment.
 
 ```bash
 log() {
@@ -143,7 +135,7 @@ get_alarm_processes() {
 
 #### `update_alarm_status()`
 
-Actualizează baza de date pentru a șterge starea de alarmă după repornirea cu succes.
+Actualizează baza de date pentru a șterge starea de alarmă după repornirea cu succes (util pentru medii de test; în producție utilizatorul are doar SELECT).
 
 ```bash
 update_alarm_status() {
@@ -156,7 +148,7 @@ update_alarm_status() {
 
 #### `get_restart_strategy()`
 
-Determină strategia de repornire pentru un proces.
+Determină strategia de repornire pentru un proces: `service`, `process` sau `custom`.
 
 ```bash
 get_restart_strategy() {
@@ -167,17 +159,13 @@ get_restart_strategy() {
 
 #### `restart_process()`
 
-Încearcă să repornească un proces folosind strategia configurată.
+Încearcă să repornească un proces folosind strategia configurată. Comportamente principale:
 
-```bash
-restart_process() {
-    local process_name="$1"
-    # Get restart strategy, max attempts, and restart delay
-    # Execute pre-restart command if configured
-    # Attempt restart using the appropriate strategy
-    # Perform health check after restart
-}
-```
+- `custom`: dacă există `restart_command`, este executat prioritar. În caz contrar, fallback pe `initctl start/restart` cu `system_name`.
+- `service`: dacă există `restart_command`, este executat; altfel fallback `initctl start/restart`.
+- `process`: dacă există `restart_command`, este executat; altfel `pgrep/pkill` și restartul binarului.
+
+După fiecare încercare se execută `perform_health_check()`; succesul confirmă repornirea.
 
 #### `execute_pre_restart()`
 
@@ -196,11 +184,12 @@ execute_pre_restart() {
 Verifică repornirea cu succes folosind comanda de health check configurată.
 
 ```bash
-perform_health_check() {
+restart_process() {
     local process_name="$1"
-    # Get health check command and timeout
-    # Replace %s with process name if present
-    # Try health check with timeout and retries
+    # Get restart strategy, max attempts, and restart delay
+    # Execute pre-restart command if configured
+    # Attempt restart using the appropriate strategy
+    # Perform health check after restart
 }
 ```
 
@@ -210,28 +199,12 @@ perform_health_check() {
 
 Verifică dacă circuit breaker-ul este deschis pentru un proces.
 
-```bash
-check_circuit_breaker() {
-    local process_name="$1"
-    # Initialize if not exists
-    # Check if circuit breaker is open
-    # Reset if enough time has passed
-}
-```
+Rulează comanda de health-check cu retry până la timeout; `%s` este înlocuit cu `system_name` sau numele procesului.
 
 #### `update_circuit_breaker()`
 
-Actualizează starea circuit breaker-ului pe baza succesului/eșecului repornirii.
-
-```bash
-update_circuit_breaker() {
-    local process_name="$1"
-    local success="$2"
-    # Increment failure count on failure
-    # Open circuit breaker if failure threshold reached
-    # Reset failure count on success
-}
-```
+- `check_circuit_breaker()`: verifică dacă circuitul este deschis, afisează timpul rămas până la reset, resetează dacă a expirat `circuit_reset_time`.
+- `update_circuit_breaker()`: incrementează contorul de eșecuri și deschide circuitul după `max_restart_failures`; la succes, resetează contorul.
 
 ## Modele de Design
 
@@ -262,32 +235,7 @@ update_circuit_breaker() {
 
 ### Modelul Strategy
 
-Serviciul utilizează un model strategy pentru repornirea proceselor, suportând mai multe strategii de repornire:
-
-1. **service**: Utilizează systemd pentru a reporni procesul ca serviciu
-2. **process**: Oprește și repornește direct procesul
-3. **auto**: Încearcă mai întâi repornirea ca serviciu, apoi revine la repornirea ca proces
-
-Detalii de implementare:
-
-```bash
-restart_process() {
-    local process_name="$1"
-    local strategy=$(get_restart_strategy "$process_name")
-
-    case "$strategy" in
-        "service")
-            # Service restart strategy
-            ;;
-        "process")
-            # Process restart strategy
-            ;;
-        "auto"|*)
-            # Auto restart strategy
-            ;;
-    esac
-}
-```
+Strategiile suportate: `service`, `process`, `custom`. Nu există strategie `auto` în implementarea curentă.
 
 ## Considerații de Securitate
 
@@ -327,12 +275,10 @@ Serviciul necesită permisiuni specifice pentru fișiere:
 
 ## Gestionarea Erorilor
 
-Serviciul implementează o gestionare robustă a erorilor:
-
-1. **Validarea Configurației**: Validează toți parametrii de configurare
-2. **Erori de Conexiune la Baza de Date**: Înregistrează erorile și continuă operațiunea
-3. **Eșecuri de Repornire**: Implementează circuit breaker pentru a preveni încercările excesive de repornire
-4. **Eșecuri de Health Check**: Înregistrează eșecurile și consideră repornirea nereușită
+- Validare configurare în `read_config()`; numeric și câmpuri obligatorii.
+- Erori MySQL logate; serviciul continuă și reîncearcă conform `check_interval`.
+- Eșecuri de restart: circuit breaker previne loop-uri agresive.
+- Eșecuri health check: consideră încercarea nereușită și reîncearcă până la `max_attempts`.
 
 ## Extinderea Serviciului
 
@@ -491,24 +437,12 @@ Serviciul are cerințe minime de memorie:
 
 ## Depanare
 
-### Debugging
-
-Pentru a depana serviciul:
-
-1. Rulați scriptul cu debugging bash:
-   ```bash
-   bash -x ./monitor_service.sh
-   ```
-
-2. Adăugați jurnalizare de debug suplimentară:
-   ```bash
-   log "DEBUG" "Variable value: $variable"
-   ```
-
-3. Verificați starea bazei de date:
-   ```bash
-   mysql -u root -p -e "USE v_process_monitor; SELECT * FROM STATUS_PROCESS JOIN PROCESE USING (process_id);"
-   ```
+- Rulați cu `bash -x ./monitor_service.sh` pentru debug.
+- Folosiți logurile în format JSON pentru filtrare (`jq`).
+- Verificați baza de date:
+  ```bash
+  mysql -u root -p -e "USE v_process_monitor; SELECT * FROM STATUS_PROCESS JOIN PROCESE USING (process_id);"
+  ```
 
 
 
